@@ -1,0 +1,57 @@
+name: Install reviewed static preview
+on:
+  push:
+    branches: [gh-pages]
+    paths: ['_source/**', '.github/workflows/install-reviewed.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore exact reviewed HTML
+        run: |
+          python3 - <<'PY'
+          import base64,lzma,json,hashlib,pathlib,os
+          p=pathlib.Path('_source')
+          b=(p/'sites.part1.b64').read_text().strip()+(p/'sites.part2.b64').read_text().strip()
+          assert hashlib.sha256(b.encode()).hexdigest()=='f7a7e430e238e57d45733e6d4c47fbae2f6070d4943ef08db6a8b24e85203681','Transport checksum mismatch'
+          raw=lzma.decompress(base64.b64decode(b,validate=True))
+          assert hashlib.sha256(raw).hexdigest()=='d01babad3f9d5fcd544dd1f6aa61c7cfbe7c1b13e29b181881ecd0707ca525c7'
+          sites=json.loads(raw)
+          name=os.environ['GITHUB_REPOSITORY'].split('/')[1]
+          html=sites[name].encode()
+          assert hashlib.sha256(html).hexdigest()=='4c2ed74c9674ffc055bdc9ee750d035570fb31a84b7e0a1e344d9dc9f1f48c7a'
+          pathlib.Path('index.html').write_bytes(html)
+          pathlib.Path('.nojekyll').write_text('')
+          print('Verified original HTML:',name,len(html),'bytes')
+          PY
+      - name: Commit public site
+        run: |
+          git config user.name 'SharpSites Publisher'
+          git config user.email 'publisher@users.noreply.github.com'
+          git add index.html .nojekyll
+          if ! git diff --cached --quiet; then
+            git commit -m 'Publish exact reviewed SharpSites HTML'
+            git push origin HEAD:gh-pages
+          fi
+      - name: Request Pages rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.error,os,time
+          u='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']+'/pages/builds'
+          for i in range(5):
+              req=urllib.request.Request(u,data=b'{}',method='POST',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'})
+              try:
+                  with urllib.request.urlopen(req,timeout=30) as r: print('Pages build requested:',r.status)
+                  break
+              except urllib.error.HTTPError as e:
+                  if e.code==409 and i<4: time.sleep(12); continue
+                  raise
+          PY
